@@ -2,6 +2,8 @@ package spectral
 
 import "sort"
 
+const maxFrameQueueEntries = 4096
+
 type frameEntry struct {
 	sequenceID uint32
 	payload    []byte
@@ -23,9 +25,24 @@ func (f *frameQueue) top() *frameEntry {
 	return nil
 }
 
-func (f *frameQueue) enqueue(sequenceID uint32, p []byte) {
+func (f *frameQueue) enqueue(sequenceID uint32, p []byte) bool {
+	if sequenceID < f.expected {
+		return true
+	}
+
+	for _, entry := range f.queue {
+		if entry.sequenceID == sequenceID {
+			return true
+		}
+	}
+
+	if len(f.queue) >= maxFrameQueueEntries {
+		return false
+	}
+
 	f.queue = append(f.queue, &frameEntry{sequenceID: sequenceID, payload: append([]byte(nil), p...)})
 	sort.Slice(f.queue, func(i, j int) bool { return f.queue[i].sequenceID < f.queue[j].sequenceID })
+	return true
 }
 
 func (f *frameQueue) dequeue() {

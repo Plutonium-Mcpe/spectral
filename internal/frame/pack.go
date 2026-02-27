@@ -8,6 +8,8 @@ import (
 	"github.com/cooldogedev/spectral/internal/protocol"
 )
 
+const maxFramesPerPacket = 256
+
 func PackSingle(fr Frame) []byte {
 	id := make([]byte, 4)
 	binary.LittleEndian.PutUint32(id, fr.ID())
@@ -33,19 +35,43 @@ func Unpack(p []byte) (connectionID protocol.ConnectionID, sequenceID uint32, fr
 	sequenceID = binary.LittleEndian.Uint32(p[12:16])
 	offset := 16
 	for length > offset {
+		if length-offset < 4 {
+			releaseFrameSlice(frames)
+			return 0, 0, nil, errors.New("incomplete frame header")
+		}
+
+		if len(frames) >= maxFramesPerPacket {
+			releaseFrameSlice(frames)
+			return 0, 0, nil, errors.New("too many frames in packet")
+		}
+
 		frameID = binary.LittleEndian.Uint32(p[offset : offset+4])
 		offset += 4
 		fr, err := getFrame(frameID)
 		if err != nil {
+			releaseFrameSlice(frames)
 			return 0, 0, nil, err
 		}
 
 		n, err := fr.Decode(p[offset:])
 		if err != nil {
+			PutFrame(fr)
+			releaseFrameSlice(frames)
 			return 0, 0, nil, fmt.Errorf("error while decoding frame %v: %v", frameID, err)
+		}
+		if n < 0 || n > length-offset {
+			PutFrame(fr)
+			releaseFrameSlice(frames)
+			return 0, 0, nil, errors.New("invalid frame payload length")
 		}
 		frames = append(frames, fr)
 		offset += n
 	}
 	return
+}
+
+func releaseFrameSlice(frames []Frame) {
+	for _, fr := range frames {
+		PutFrame(fr)
+	}
 }

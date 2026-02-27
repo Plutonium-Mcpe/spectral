@@ -26,6 +26,8 @@ func newServerConnection(conn *udpConn, peerAddr *net.UDPAddr, connectionID prot
 
 func (c *ServerConnection) AcceptStream(ctx context.Context) (*Stream, error) {
 	select {
+	case <-c.ctx.Done():
+		return nil, context.Cause(c.ctx)
 	case <-ctx.Done():
 		return nil, context.Cause(ctx)
 	case request := <-c.streamRequests:
@@ -50,7 +52,11 @@ func (c *ServerConnection) handle(fr frame.Frame) (err error) {
 			return err
 		}
 	case *frame.StreamRequest:
-		c.streamRequests <- fr
+		select {
+		case c.streamRequests <- fr:
+		default:
+			_ = c.writeControl(&frame.StreamResponse{StreamID: fr.StreamID, Response: frame.StreamResponseFailed}, true)
+		}
 	}
 	return
 }

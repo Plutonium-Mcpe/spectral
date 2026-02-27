@@ -3,6 +3,8 @@ package frame
 import (
 	"encoding/binary"
 	"errors"
+
+	"github.com/cooldogedev/spectral/internal/protocol"
 )
 
 type MTURequest struct {
@@ -14,8 +16,15 @@ func (fr *MTURequest) ID() uint32 {
 }
 
 func (fr *MTURequest) Encode() []byte {
-	p := make([]byte, fr.MTU)
-	binary.LittleEndian.PutUint64(p[0:8], fr.MTU)
+	mtu := fr.MTU
+	if mtu < 8 {
+		mtu = 8
+	}
+	if mtu > protocol.MaxPacketSize {
+		mtu = protocol.MaxPacketSize
+	}
+	p := make([]byte, mtu)
+	binary.LittleEndian.PutUint64(p[0:8], mtu)
 	return p
 }
 
@@ -23,8 +32,17 @@ func (fr *MTURequest) Decode(p []byte) (int, error) {
 	if len(p) < 8 {
 		return 0, errors.New("not enough data to decode")
 	}
-	fr.MTU = binary.LittleEndian.Uint64(p[0:8])
-	return int(fr.MTU), nil
+
+	mtu := binary.LittleEndian.Uint64(p[0:8])
+	if mtu < 8 || mtu > protocol.MaxPacketSize {
+		return 0, errors.New("invalid mtu size")
+	}
+	if len(p) < int(mtu) {
+		return 0, errors.New("not enough data to decode mtu payload")
+	}
+
+	fr.MTU = mtu
+	return int(mtu), nil
 }
 
 func (fr *MTURequest) Reset() {}

@@ -6,9 +6,12 @@ import (
 	"github.com/cooldogedev/spectral/internal/protocol"
 )
 
+const maxSendQueueBytes = 32 * 1024 * 1024
+
 type sendQueue struct {
 	queue          [][]byte
 	pk             []byte
+	queuedBytes    uint64
 	maxSegmentSize uint64
 	mu             sync.RWMutex
 }
@@ -38,10 +41,17 @@ func (s *sendQueue) setMSS(mss uint64) {
 	s.mu.Unlock()
 }
 
-func (s *sendQueue) add(p []byte) {
+func (s *sendQueue) add(p []byte) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.queuedBytes+uint64(len(p)) > maxSendQueueBytes {
+		return false
+	}
+
 	s.queue = append(s.queue, p)
-	s.mu.Unlock()
+	s.queuedBytes += uint64(len(p))
+	return true
 }
 
 func (s *sendQueue) pack(window uint64) []byte {
@@ -59,6 +69,7 @@ func (s *sendQueue) pack(window uint64) []byte {
 		}
 		s.queue[0] = nil
 		s.queue = s.queue[1:]
+		s.queuedBytes -= uint64(len(entry))
 		s.pk = append(s.pk, entry...)
 	}
 	return s.pk
@@ -77,6 +88,7 @@ func (s *sendQueue) clear() {
 	}
 	s.queue = s.queue[:0]
 	s.queue = nil
+	s.queuedBytes = 0
 	s.pk = s.pk[:0]
 	s.pk = nil
 	s.mu.Unlock()

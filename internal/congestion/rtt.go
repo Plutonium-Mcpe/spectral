@@ -30,7 +30,7 @@ func (r *RTT) Add(latestRTT, ackDelay time.Duration) {
 	}
 
 	r.latestRTT = latestRTT
-	if r.measured {
+	if !r.measured {
 		r.measured = true
 		r.minRTT = latestRTT
 		r.smoothedRTT = latestRTT

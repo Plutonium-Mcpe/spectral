@@ -3,6 +3,9 @@ package frame
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+
+	"github.com/cooldogedev/spectral/internal/protocol"
 )
 
 type AcknowledgementRange [2]uint32
@@ -39,11 +42,18 @@ func (fr *Acknowledgement) Decode(p []byte) (int, error) {
 	fr.Delay = int64(binary.LittleEndian.Uint64(p[0:8]))
 	fr.Max = binary.LittleEndian.Uint32(p[8:12])
 	length := binary.LittleEndian.Uint32(p[12:16])
+	if length > protocol.MaxAckRanges {
+		return 0, fmt.Errorf("ack range count exceeds limit: %d", length)
+	}
 	if len(p) < 16+int(length)*8 {
 		return 0, errors.New("not enough data to decode ranges")
 	}
 
-	fr.Ranges = fr.Ranges[:length]
+	if cap(fr.Ranges) < int(length) {
+		fr.Ranges = make([]AcknowledgementRange, int(length))
+	} else {
+		fr.Ranges = fr.Ranges[:length]
+	}
 	for i := uint32(0); i < length; i++ {
 		offset := 16 + i*8
 		fr.Ranges[i][0] = binary.LittleEndian.Uint32(p[offset : offset+4])

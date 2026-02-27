@@ -69,3 +69,7 @@ func (c *udpConn) Close() error {
 	}
 	return c.conn.Close()
 }
+
+func (c *udpConn) closeListener() error {
+	return c.conn.Close()
+}

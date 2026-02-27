@@ -215,16 +215,22 @@ func (c *connection) receive(now, t time.Time, sequenceID uint32, frames []frame
 		c.ack.add(t, sequenceID)
 		if !c.receiveQueue.add(sequenceID) {
 			c.logger.Log("duplicate_receive", "sequenceID", sequenceID)
+			releaseFrames(frames)
 			return
 		}
 	}
 
-	for _, fr := range frames {
-		if err := c.handler(fr); err != nil {
-			return err
+	for i, fr := range frames {
+		if c.handler != nil {
+			if err := c.handler(fr); err != nil {
+				frame.PutFrame(fr)
+				releaseFrames(frames[i+1:])
+				return err
+			}
 		}
 
 		if err := c.handle(now, fr); err != nil {
+			releaseFrames(frames[i+1:])
 			return err
 		}
 	}
@@ -232,6 +238,8 @@ func (c *connection) receive(now, t time.Time, sequenceID uint32, frames []frame
 }
 
 func (c *connection) handle(now time.Time, fr frame.Frame) (err error) {
+	defer frame.PutFrame(fr)
+
 	switch fr := fr.(type) {
 	case *frame.Acknowledgement:
 		for _, r := range fr.Ranges {
@@ -264,7 +272,6 @@ func (c *connection) handle(now time.Time, fr frame.Frame) (err error) {
 	case *frame.MTUResponse:
 		c.discovery.onAck(fr.MTU)
 	}
-	frame.PutFrame(fr)
 	return
 }
 
@@ -409,11 +416,8 @@ func (c *connection) cleanup() {
 	<-c.ctx.Done()
 	c.retransmission.clear()
 	c.sendQueue.clear()
-	c.handler = nil
 	c.discovery.mtuIncrease = nil
 	clear(c.receiveQueue.queue)
-	close(c.packets)
-	close(c.notify)
 }
 
 func firstTime(idle, ack, retransmission, pacing time.Time) time.Time {
