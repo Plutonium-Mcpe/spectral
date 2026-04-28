@@ -15,6 +15,8 @@ import (
 
 var streamDataPool = sync.Pool{New: func() any { return &frame.StreamData{} }}
 
+const streamBufferSize = 1024 * 1024
+
 type Stream struct {
 	ctx        context.Context
 	cancelFunc context.CancelCauseFunc
@@ -27,6 +29,7 @@ type Stream struct {
 	available  chan struct{}
 	sequenceID atomic.Uint32
 	logger     log.Logger
+	writeMu    sync.Mutex
 	mu         sync.Mutex
 	once       sync.Once
 }
@@ -41,44 +44,71 @@ func newStream(streamID protocol.StreamID, parentCtx context.Context, sendQueue 
 		closer:     closer,
 		sendQueue:  sendQueue,
 		frame:      newFrameQueue(),
-		buffer:     internal.NewRingBuffer[byte](1024 * 1024),
+		buffer:     internal.NewRingBuffer[byte](streamBufferSize),
 		available:  make(chan struct{}, 1),
 		logger:     logger,
 	}
 }
 
 func (s *Stream) Read(p []byte) (int, error) {
-	if n := s.read(p); n > 0 {
-		return n, nil
-	}
+	for {
+		if n := s.read(p); n > 0 {
+			return n, nil
+		}
 
-	select {
-	case <-s.ctx.Done():
-		return 0, context.Cause(s.ctx)
-	case <-s.available:
-		return s.read(p), nil
+		select {
+		case <-s.ctx.Done():
+			return 0, context.Cause(s.ctx)
+		case <-s.available:
+		}
 	}
 }
 
+// Write may return a partial write with an error when the connection send queue is full.
 func (s *Stream) Write(p []byte) (int, error) {
 	select {
 	case <-s.ctx.Done():
 		return 0, context.Cause(s.ctx)
 	default:
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 
 	mss := int(s.sendQueue.mss()) - 20
+	if mss <= 0 {
+		return 0, errors.New("invalid maximum segment size")
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	nextSequence := s.sequenceID.Load()
+	written := 0
 	fr := streamDataPool.Get().(*frame.StreamData)
 	fr.StreamID = s.streamID
 	for payload := range slices.Chunk(p, mss) {
-		fr.SequenceID = s.sequenceID.Add(1) - 1
+		fr.SequenceID = nextSequence
 		fr.Payload = payload
-		s.sendQueue.add(frame.PackSingle(fr))
+		if !s.sendQueue.add(frame.PackSingle(fr)) {
+			fr.Payload = fr.Payload[:0]
+			streamDataPool.Put(fr)
+			if written == 0 {
+				return 0, errors.New("send queue full")
+			}
+			s.wake()
+			return written, errors.New("send queue full")
+		}
+		nextSequence++
+		s.sequenceID.Store(nextSequence)
+		written += len(payload)
 	}
 	fr.Payload = fr.Payload[:0]
 	streamDataPool.Put(fr)
-	s.wake()
-	return len(p), nil
+	if written > 0 {
+		s.wake()
+	}
+	return written, nil
 }
 
 func (s *Stream) Context() context.Context {
@@ -114,16 +144,24 @@ func (s *Stream) receive(sequenceID uint32, p []byte) {
 		return
 	default:
 	}
+	if len(p) > streamBufferSize {
+		_ = s.internalClose("stream payload exceeds buffer")
+		return
+	}
 
+	overflow := false
 	s.mu.Lock()
 	if s.frame.expected == sequenceID && s.buffer.Free() >= len(p) {
 		s.frame.expected++
 		_, _ = s.buffer.Write(p)
 	} else {
-		s.frame.enqueue(sequenceID, p)
+		overflow = !s.frame.enqueue(sequenceID, p)
 	}
 	s.processFrames()
 	s.mu.Unlock()
+	if overflow {
+		_ = s.internalClose("stream frame queue full")
+	}
 }
 
 func (s *Stream) processFrames() {

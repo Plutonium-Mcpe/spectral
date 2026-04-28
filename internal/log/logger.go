@@ -28,6 +28,8 @@ type FileLogger struct {
 	mu          sync.Mutex
 }
 
+const maxBufferedLogs = 256
+
 func (f *FileLogger) SetConnectionID(connectionID protocol.ConnectionID) {
 	f.mu.Lock()
 	b := make([]byte, 20)
@@ -48,7 +50,11 @@ func (f *FileLogger) SetConnectionID(connectionID protocol.ConnectionID) {
 func (f *FileLogger) Log(event string, params ...any) {
 	var pairs []string
 	for i := 0; i < len(params); i += 2 {
-		pairs = append(pairs, fmt.Sprintf("%v=%v", params[i], params[i+1]))
+		if i+1 < len(params) {
+			pairs = append(pairs, fmt.Sprintf("%v=%v", params[i], params[i+1]))
+		} else {
+			pairs = append(pairs, fmt.Sprintf("%v=%v", params[i], "<missing>"))
+		}
 	}
 
 	log := fmt.Sprintf("timestamp=%s event=%s %s\n", time.Now().Format(time.RFC3339), event, strings.Join(pairs, " "))
@@ -56,6 +62,10 @@ func (f *FileLogger) Log(event string, params ...any) {
 	if f.writer != nil {
 		_, _ = f.writer.WriteString(log)
 	} else {
+		if len(f.buffered) >= maxBufferedLogs {
+			copy(f.buffered, f.buffered[1:])
+			f.buffered = f.buffered[:len(f.buffered)-1]
+		}
 		f.buffered = append(f.buffered, log)
 	}
 	f.mu.Unlock()

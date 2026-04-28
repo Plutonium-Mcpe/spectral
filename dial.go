@@ -36,25 +36,39 @@ func Dial(ctx context.Context, address string) (Connection, error) {
 
 	go uConn.Read(func(dgram *datagram) (err error) {
 		defer dgram.reset()
+		if !udpAddrEqual(dgram.peerAddr, addr) {
+			return nil
+		}
+
 		_, sequenceID, frames, err := frame.Unpack(dgram.b)
 		if err != nil {
 			c.logger.Log("unpack_err", "err", err.Error())
-			return err
+			return nil
 		}
 
 		select {
 		case <-c.ctx.Done():
+			releaseFrames(frames)
 			return context.Cause(c.ctx)
+		case c.packets <- &receivedPacket{sequenceID, frames, time.Now()}:
+			return
 		default:
-			c.packets <- &receivedPacket{sequenceID, frames, time.Now()}
+			releaseFrames(frames)
+			_ = c.CloseWithError(frame.ConnectionCloseInternal, "connection packet queue full")
 			return
 		}
 	})
 	select {
 	case <-ctx.Done():
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = ctx.Err()
+		}
 		c.logger.Log("connection_request_timeout")
-		_ = c.CloseWithError(frame.ConnectionCloseInternal, fmt.Sprintf("dialer context: %v", context.Cause(ctx).Error()))
-		return nil, context.Cause(ctx)
+		_ = c.CloseWithError(frame.ConnectionCloseInternal, fmt.Sprintf("dialer context: %v", cause))
+		return nil, cause
+	case <-c.ctx.Done():
+		return nil, context.Cause(c.ctx)
 	case response := <-c.response:
 		if response.Response == frame.ConnectionResponseFailed {
 			c.logger.Log("connection_request_fail")

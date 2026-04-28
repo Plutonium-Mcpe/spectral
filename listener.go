@@ -15,7 +15,7 @@ import (
 type Listener struct {
 	conn                *udpConn
 	connections         map[protocol.ConnectionID]*ServerConnection
-	connectionsMu       sync.Mutex
+	connectionsMu       sync.RWMutex
 	connectionID        protocol.ConnectionID
 	incomingConnections chan *ServerConnection
 	ctx                 context.Context
@@ -37,33 +37,59 @@ func newListener(conn *udpConn) *Listener {
 			return nil
 		}
 
+		var (
+			c             *ServerConnection
+			newConnection bool
+		)
 		listener.connectionsMu.Lock()
-		defer listener.connectionsMu.Unlock()
 		c, ok := listener.connections[connectionID]
+		if ok && !udpAddrEqual(c.peerAddr, dgram.peerAddr) {
+			listener.connectionsMu.Unlock()
+			releaseFrames(frames)
+			return nil
+		}
+
 		if !ok && slices.ContainsFunc(frames, func(fr frame.Frame) bool { return fr.ID() == frame.IDConnectionRequest }) {
-			c = newServerConnection(conn, dgram.peerAddr, listener.connectionID, listener.ctx)
+			assignedID := listener.connectionID
+			c = newServerConnection(conn, dgram.peerAddr, assignedID, listener.ctx)
 			c.logger.Log("connection_accepted", "addr", dgram.peerAddr.String())
-			listener.connections[listener.connectionID] = c
+			listener.connections[assignedID] = c
 			listener.connectionID++
-			listener.incomingConnections <- c
+			newConnection = true
 			go func() {
 				<-c.ctx.Done()
 				listener.connectionsMu.Lock()
-				delete(listener.connections, protocol.ConnectionID(c.connectionID.Load()))
+				delete(listener.connections, assignedID)
 				listener.connectionsMu.Unlock()
 			}()
 		}
+		listener.connectionsMu.Unlock()
 
 		if c == nil {
+			releaseFrames(frames)
 			return
+		}
+
+		if newConnection {
+			select {
+			case listener.incomingConnections <- c:
+			default:
+				releaseFrames(frames)
+				_ = c.CloseWithError(frame.ConnectionCloseInternal, "connection accept queue full")
+				return nil
+			}
 		}
 
 		select {
 		case <-listener.ctx.Done():
+			releaseFrames(frames)
 			return context.Cause(listener.ctx)
 		case <-c.ctx.Done():
+			releaseFrames(frames)
+		case c.packets <- &receivedPacket{sequenceID, frames, time.Now()}:
 		default:
-			c.packets <- &receivedPacket{sequenceID, frames, time.Now()}
+			releaseFrames(frames)
+			_ = c.CloseWithError(frame.ConnectionCloseInternal, "connection packet queue full")
 		}
 		return
 	})
@@ -83,6 +109,7 @@ func Listen(address string) (*Listener, error) {
 
 	c, err := newUDPConn(conn, true)
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	return newListener(c), nil
@@ -101,12 +128,32 @@ func (l *Listener) Accept(ctx context.Context) (Connection, error) {
 
 func (l *Listener) Close() (err error) {
 	l.once.Do(func() {
+		l.connectionsMu.Lock()
+		conns := make([]*ServerConnection, 0, len(l.connections))
 		for i, conn := range l.connections {
-			_ = conn.CloseWithError(frame.ConnectionCloseGraceful, "closed listener")
+			conns = append(conns, conn)
 			delete(l.connections, i)
 		}
+		l.connectionsMu.Unlock()
+
+		for _, conn := range conns {
+			_ = conn.CloseWithError(frame.ConnectionCloseGraceful, "closed listener")
+		}
 		l.cancelFunc()
-		_ = l.conn.Close()
+		_ = l.conn.closeListener()
 	})
 	return
+}
+
+func udpAddrEqual(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
+}
+
+func releaseFrames(frames []frame.Frame) {
+	for _, fr := range frames {
+		frame.PutFrame(fr)
+	}
 }
