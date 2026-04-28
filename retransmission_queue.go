@@ -6,13 +6,17 @@ import (
 	"time"
 )
 
-const retransmissionAttempts = 3
+const (
+	retransmissionAttempts = 20
+	maxBackoff             = 2 * time.Second
+)
 
 type retransmissionEntry struct {
 	sequenceID uint32
 	payload    []byte
 	sent       time.Time
 	attempts   int
+	backoff    time.Duration
 }
 
 type retransmissionQueue struct {
@@ -47,7 +51,12 @@ func (r *retransmissionQueue) next(rto time.Duration) (t time.Time) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if len(r.queue) > 0 {
-		return r.queue[0].sent.Add(rto)
+		entry := r.queue[0]
+		waitFor := entry.backoff
+		if waitFor == 0 {
+			waitFor = rto
+		}
+		return entry.sent.Add(waitFor)
 	}
 	return
 }
@@ -60,10 +69,22 @@ func (r *retransmissionQueue) shift(now time.Time, rto time.Duration) (p []byte,
 	}
 
 	entry := r.queue[0]
-	if now.Sub(entry.sent) >= rto {
+	waitFor := entry.backoff
+	if waitFor == 0 {
+		waitFor = rto
+	}
+
+	if now.Sub(entry.sent) >= waitFor {
 		sent := entry.sent
 		entry.sent = now
 		entry.attempts++
+
+		next := waitFor * 2
+		if next > maxBackoff {
+			next = maxBackoff
+		}
+		entry.backoff = next
+
 		if entry.attempts >= retransmissionAttempts {
 			r.queue[0] = nil
 			r.queue = r.queue[1:]
