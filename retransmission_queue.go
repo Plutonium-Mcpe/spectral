@@ -61,7 +61,13 @@ func (r *retransmissionQueue) next(rto time.Duration) (t time.Time) {
 	return
 }
 
-func (r *retransmissionQueue) shift(now time.Time, rto time.Duration) (p []byte, t time.Time) {
+// shift returns the next packet due for retransmission. gaveUp is true when a
+// reliable packet has exhausted retransmissionAttempts: the connection can no
+// longer guarantee ordered delivery (the peer's streams have a permanent gap)
+// and the caller must tear the connection down loudly instead of silently
+// dropping the packet — the previous behavior left streams stalled forever
+// while the connection stayed "healthy".
+func (r *retransmissionQueue) shift(now time.Time, rto time.Duration) (p []byte, t time.Time, gaveUp bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.queue) == 0 {
@@ -88,11 +94,11 @@ func (r *retransmissionQueue) shift(now time.Time, rto time.Duration) (p []byte,
 		if entry.attempts >= retransmissionAttempts {
 			r.queue[0] = nil
 			r.queue = r.queue[1:]
-		} else {
-			r.queue = append(r.queue[1:], entry)
-			r.sort()
+			return entry.payload, sent, true
 		}
-		return entry.payload, sent
+		r.queue = append(r.queue[1:], entry)
+		r.sort()
+		return entry.payload, sent, false
 	}
 	return
 }
