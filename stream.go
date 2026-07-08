@@ -189,7 +189,13 @@ func (s *Stream) read(p []byte) (n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.buffer.Len() > 0 {
-		return s.buffer.Read(p)
+		n = s.buffer.Read(p)
+		// Draining the buffer may have freed room for frames parked in the
+		// reorder queue. processFrames is otherwise only invoked from
+		// receive(), i.e. when a NEW frame arrives — with an idle sender
+		// (request/response protocols) parked in-order frames would never be
+		// delivered and Read would block forever on s.available.
+		s.processFrames()
 	}
 	return
 }

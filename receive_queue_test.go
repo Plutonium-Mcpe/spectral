@@ -6,7 +6,7 @@ func TestReceiveQueueAllowsExpectedWhenFull(t *testing.T) {
 	q := newReceiveQueue()
 
 	for sequenceID := uint32(2); sequenceID <= maxReceiveQueueEntries+1; sequenceID++ {
-		if !q.add(sequenceID) {
+		if q.add(sequenceID) != receiveAccepted {
 			t.Fatalf("expected sequence %d to be queued", sequenceID)
 		}
 	}
@@ -15,7 +15,7 @@ func TestReceiveQueueAllowsExpectedWhenFull(t *testing.T) {
 		t.Fatalf("expected queue length %d, got %d", maxReceiveQueueEntries, len(q.queue))
 	}
 
-	if !q.add(1) {
+	if q.add(1) != receiveAccepted {
 		t.Fatal("expected missing sequence to be admitted when queue is full")
 	}
 

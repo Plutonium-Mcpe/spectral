@@ -201,7 +201,19 @@ func (c *connection) triggerTimer(now time.Time) (err error) {
 		return errors.New("network inactivity")
 	}
 
-	if pk, t := c.retransmission.shift(now, c.rtt.RTO()); len(pk) > 0 {
+	if pk, t, gaveUp := c.retransmission.shift(now, c.rtt.RTO()); len(pk) > 0 {
+		if gaveUp {
+			// A reliable packet exhausted its retransmission attempts. The
+			// peer has a permanent gap in a stream — every subsequent frame
+			// on it would park in the reorder queue forever. Fail loudly so
+			// the application (spectrum) can fall back / redial instead of
+			// serving frozen sessions. This also releases the packet's bytes
+			// from the congestion window, which previously leaked and could
+			// mute the connection permanently.
+			c.sender.OnAck(now, t, c.rtt, uint64(len(pk))-protocol.PacketHeaderSize)
+			_ = c.CloseWithError(frame.ConnectionCloseTimeout, "retransmission exhausted")
+			return errors.New("retransmission exhausted")
+		}
 		c.sender.OnCongestionEvent(now, t)
 		if _, err := c.writeDatagram(pk); err != nil {
 			return err
@@ -212,9 +224,23 @@ func (c *connection) triggerTimer(now time.Time) (err error) {
 
 func (c *connection) receive(now, t time.Time, sequenceID uint32, frames []frame.Frame) (err error) {
 	if sequenceID != 0 {
-		c.ack.add(t, sequenceID)
-		if !c.receiveQueue.add(sequenceID) {
+		switch c.receiveQueue.add(sequenceID) {
+		case receiveAccepted:
+			c.ack.add(t, sequenceID)
+		case receiveDuplicate:
+			// Re-ack: our previous acknowledgement may have been lost and the
+			// peer keeps retransmitting until it sees one.
+			c.ack.add(t, sequenceID)
 			c.logger.Log("duplicate_receive", "sequenceID", sequenceID)
+			releaseFrames(frames)
+			return
+		case receiveRejected:
+			// Outside the receive window / queue full. Deliberately NOT
+			// acked: the previous behavior (ack before add) made the sender
+			// forget the packet while we dropped it — silent permanent data
+			// loss and a stuck stream. Unacked, the peer retransmits it once
+			// the window advances.
+			c.logger.Log("rejected_receive", "sequenceID", sequenceID)
 			releaseFrames(frames)
 			return
 		}
