@@ -75,7 +75,7 @@ func newConnection(conn *udpConn, peerAddr *net.UDPAddr, connectionID protocol.C
 		ctx:            ctx,
 		cancelFunc:     cancelFunc,
 		sender:         congestion.NewSender(logger, now, protocol.MinPacketSize),
-		packets:        make(chan *receivedPacket, 1024),
+		packets:        make(chan *receivedPacket, 512),
 		ack:            newAckQueue(),
 		receiveQueue:   newReceiveQueue(),
 		retransmission: newRetransmissionQueue(),
