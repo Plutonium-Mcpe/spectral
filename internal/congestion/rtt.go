@@ -6,7 +6,10 @@ import (
 	"github.com/cooldogedev/spectral/internal/protocol"
 )
 
-const initialRTT = time.Millisecond * 333
+const (
+	initialRTT = time.Millisecond * 333
+	maxRTO     = time.Second
+)
 
 type RTT struct {
 	measured    bool
@@ -68,5 +71,5 @@ func (r *RTT) RTTVAR() time.Duration {
 }
 
 func (r *RTT) RTO() time.Duration {
-	return r.smoothedRTT + max(4*r.rttVar, protocol.TimerGranularity) + protocol.MaxAckDelay
+	return min(r.smoothedRTT+max(4*r.rttVar, protocol.TimerGranularity)+protocol.MaxAckDelay, maxRTO)
 }

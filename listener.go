@@ -89,7 +89,7 @@ func newListener(conn *udpConn) *Listener {
 		case c.packets <- &receivedPacket{sequenceID, frames, time.Now()}:
 		default:
 			releaseFrames(frames)
-			_ = c.CloseWithError(frame.ConnectionCloseInternal, "connection packet queue full")
+			c.logger.Log("packet_dropped", "reason", "receive queue full")
 		}
 		return
 	})

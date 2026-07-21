@@ -54,7 +54,7 @@ func Dial(ctx context.Context, address string) (Connection, error) {
 			return
 		default:
 			releaseFrames(frames)
-			_ = c.CloseWithError(frame.ConnectionCloseInternal, "connection packet queue full")
+			c.logger.Log("packet_dropped", "reason", "receive queue full")
 			return
 		}
 	})
